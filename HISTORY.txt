@@ -1,0 +1,74 @@
+commit 676ef7503d903c1109753cd1f6a5cbfb116bd965
+Author: Pedro Ribeiro <pedroribeiro@vt.edu>
+Date:   2026-11-08 23:48:18 -0500
+
+    finished
+
+ CMakeLists.txt                   |  19 ++-
+ DESIGN.md                        |  59 ++++++++-
+ include/aiws/corpus_builder.hpp  |  46 +++++++
+ include/aiws/gui/main_window.hpp |  91 ++++++++++++-
+ include/aiws/ipc_client.hpp      |  18 +++
+ include/aiws/ipc_protocol.hpp    |  27 ++++
+ include/aiws/ipc_server.hpp      |  42 ++++++
+ src/corpus_builder.cpp           | 132 +++++++++++++++++++
+ src/ipc_protocol.cpp             |  23 ++++
+ src/ipc_server.cpp               | 205 +++++++++++++++++++++++++++++
+ src/main.cpp                     |  19 +++
+ src/main_window.cpp              | 128 ++++++++++++++----
+ tests/student_tests.cpp          | 275 ++++++++++++++++++++++++++++++++++++++-
+ 13 files changed, 1055 insertions(+), 29 deletions(-)
+
+commit ad2ecdb421f9c7051b8ce94d5ab40d3f1c2e3951
+Author: Pedro Ribeiro <pedroribeiro@vt.edu>
+Date:   2026-11-07 18:14:12 -0500
+
+    loaded in m3
+
+ src/chunker.cpp               |  59 ++++++++++
+ src/context_builder.cpp       |  29 +++++
+ src/context_widget.cpp        | 110 +++++++++++++++++
+ src/corpus_index.cpp          |  72 ++++++++++++
+ src/document.cpp              |  14 +++
+ src/main.cpp                  |  23 ++++
+ src/main_window.cpp           | 267 ++++++++++++++++++++++++++++++++++++++++++
+ src/processing_core.cpp       | 100 ++++++++++++++++
+ src/retrieval_engine.cpp      |  86 ++++++++++++++
+ src/search_result_model.cpp   |  84 +++++++++++++
+ src/search_widget.cpp         | 159 +++++++++++++++++++++++++
+ src/term_inspector_widget.cpp |  94 +++++++++++++++
+ src/text_processor.cpp        | 116 ++++++++++++++++++
+ src/workspace.cpp             |  17 +++
+ src/workspace_widget.cpp      | 111 ++++++++++++++++++
+ 15 files changed, 1341 insertions(+)
+
+commit df9686ea2cf32608454c9b934112dea22f050b9e
+Author: Pedro Ribeiro <pedroribeiro@vt.edu>
+Date:   2026-10-28 18:06:34 -0400
+
+    init + design note md
+
+ CMakeLists.txt                             |  57 +++++++++++
+ DESIGN.md                                  |   3 +
+ DESIGN_NOTE.md                             |  41 ++++++++
+ include/aiws/chunker.hpp                   |  25 +++++
+ include/aiws/chunking_strategy.hpp         |  18 ++++
+ include/aiws/context_builder.hpp           |  13 +++
+ include/aiws/context_strategy.hpp          |  17 +++
+ include/aiws/corpus_index.hpp              |  36 +++++++
+ include/aiws/document.hpp                  |  22 ++++
+ include/aiws/gui/context_widget.hpp        |  75 ++++++++++++++
+ include/aiws/gui/main_window.hpp           | 159 +++++++++++++++++++++++++++++
+ include/aiws/gui/resettable.hpp            |  22 ++++
+ include/aiws/gui/search_result_model.hpp   |  84 +++++++++++++++
+ include/aiws/gui/search_widget.hpp         | 105 +++++++++++++++++++
+ include/aiws/gui/term_inspector_widget.hpp |  81 +++++++++++++++
+ include/aiws/gui/workspace_widget.hpp      | 101 ++++++++++++++++++
+ include/aiws/processing_core.hpp           |  53 ++++++++++
+ include/aiws/processing_types.hpp          |  38 +++++++
+ include/aiws/retrieval_engine.hpp          |  18 ++++
+ include/aiws/retrieval_strategy.hpp        |  20 ++++
+ include/aiws/text_processor.hpp            |  29 ++++++
+ include/aiws/workspace.hpp                 |  19 ++++
+ tests/student_tests.cpp                    |   2 +
+ 23 files changed, 1038 insertions(+)
