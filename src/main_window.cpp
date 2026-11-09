@@ -6,6 +6,7 @@
 #include "aiws/gui/search_widget.hpp"
 #include "aiws/gui/term_inspector_widget.hpp"
 #include "aiws/gui/workspace_widget.hpp"
+#include "aiws/ipc_server.hpp"
 
 #include <QFile>
 #include <QFileDialog>
@@ -16,11 +17,13 @@
 #include <QLabel>
 #include <QPushButton>
 #include <QString>
+#include <QTimer>
 #include <QVBoxLayout>
 #include <QWidget>
 
 #include <array>
 #include <cstddef>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -100,6 +103,10 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     connect(reset_button_, &QPushButton::clicked, this, &MainWindow::reset_application);
     connect(exit_button_, &QPushButton::clicked, this, &MainWindow::exit_application);
 
+    poll_timer_ = new QTimer(this);
+    poll_timer_->setInterval(20);
+    connect(poll_timer_, &QTimer::timeout, this, &MainWindow::poll_build);
+
     update_action_states();
 }
 
@@ -107,11 +114,29 @@ void MainWindow::set_exit_callback(ExitCallback callback) noexcept {
     exit_callback_ = callback;
 }
 
+// Members are destroyed in reverse order: ipc_server_ stops and joins first,
+// then builder_ cancels and joins, and only then does Qt delete the widgets.
+MainWindow::~MainWindow() = default;
+
+void MainWindow::set_build_delay_ms(int ms_per_document) {
+    build_delay_ms_ = ms_per_document;
+}
+
+void MainWindow::set_core_factory(CoreFactory factory) noexcept {
+    core_factory_ = factory;
+}
+
+MainWindow::CorpusState MainWindow::corpus_state() const noexcept {
+    return corpus_state_;
+}
+
 void MainWindow::add_document() {
     const QString path = QFileDialog::getOpenFileName(this, "Add Document", QString(),
                                                       "Text files (*.txt);;All files (*)");
-    if (path.isEmpty()) return;
+    if (!path.isEmpty()) add_document_file(path);
+}
 
+bool MainWindow::add_document_file(const QString& path) {
     const QFileInfo file_info(path);
     const std::string document_id = file_info.absoluteFilePath().toStdString();
     const QString title = file_info.fileName();
@@ -119,14 +144,14 @@ void MainWindow::add_document() {
     for (const Document& document : workspace_.documents()) {
         if (document.id() == document_id) {
             status_label_->setText(title + " is already in the workspace.");
-            return;
+            return false;
         }
     }
 
     QFile file(file_info.absoluteFilePath());
     if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
         status_label_->setText("Could not open " + title + ".");
-        return;
+        return false;
     }
     const std::string text = QString::fromUtf8(file.readAll()).toStdString();
 
@@ -134,24 +159,54 @@ void MainWindow::add_document() {
     workspace_widget_->add_document(title);
     invalidate_corpus();
     status_label_->setText("Added " + title + ". Build Corpus to process the workspace.");
+    return true;
 }
 
 void MainWindow::build_corpus() {
-    if (workspace_.documents().empty()) return;
+    if (workspace_.documents().empty() || builder_.running()) return;
 
-    try {
-        processing_core_.rebuild(workspace_);
-    } catch (const std::invalid_argument& error) {
-        status_label_->setText(QString("Build failed: ") + error.what());
+    std::unique_ptr<ProcessingCore> core =
+        core_factory_ ? core_factory_() : std::make_unique<ProcessingCore>();
+    builder_.start(std::move(core), workspace_, build_delay_ms_, ++build_id_);
+
+    set_corpus_state(CorpusState::Building);
+    workspace_widget_->set_corpus_status("Building...");
+    status_label_->setText("Building corpus...");
+    poll_timer_->start();
+    update_action_states();
+}
+
+void MainWindow::poll_build() {
+    if (!builder_.result_ready()) return;
+    poll_timer_->stop();
+    BuildResult result = builder_.take();
+
+    // Only the build started for the present Workspace may be used.
+    bool stale = result.build_id != build_id_;
+#ifdef AIWS_FAULT_ACCEPT_STALE
+    stale = false;
+#endif
+    if (stale) {
         update_action_states();
         return;
     }
 
-    corpus_current_ = true;
-    workspace_widget_->set_corpus_status(QString("%1 chunks").arg(static_cast<qulonglong>(processing_core_.chunk_count())));
+    if (!result.core) {
+        set_corpus_state(CorpusState::NotCurrent);
+        workspace_widget_->set_corpus_status("Build failed");
+        status_label_->setText("Build failed: " + QString::fromStdString(result.error));
+        update_action_states();
+        emit build_finished(false);
+        return;
+    }
+
+    corpus_ = std::move(result.core);
+    set_corpus_state(CorpusState::Current);
+    workspace_widget_->set_corpus_status(QString("%1 chunks").arg(static_cast<qulonglong>(corpus_->chunk_count())));
     clear_processing_outputs();
     update_action_states();
     status_label_->setText("Corpus built.");
+    emit build_finished(true);
 }
 
 void MainWindow::document_selected(int row) {
@@ -166,9 +221,9 @@ void MainWindow::document_selected(int row) {
 }
 
 void MainWindow::search_requested(const QString& query, int k) {
-    if (!corpus_current_ || !search_widget_->has_query()) return;
+    if (corpus_state_ != CorpusState::Current || !search_widget_->has_query()) return;
 
-    std::vector<SearchResult> results = processing_core_.search(query.toStdString(), k);
+    std::vector<SearchResult> results = corpus_->search(query.toStdString(), k);
     const std::size_t result_total = results.size();
     search_widget_->set_results(std::move(results));
     context_widget_->clear_context();
@@ -182,9 +237,9 @@ void MainWindow::query_changed(const QString& query) {
 }
 
 void MainWindow::build_context_requested(int token_budget) {
-    if (!corpus_current_ || !search_widget_->has_query()) return;
+    if (corpus_state_ != CorpusState::Current || !search_widget_->has_query()) return;
 
-    const std::vector<ContextItem> items = processing_core_.build_context(
+    const std::vector<ContextItem> items = corpus_->build_context(
         search_widget_->query().toStdString(), search_widget_->result_count(),
         static_cast<std::size_t>(token_budget));
     context_widget_->set_context(items);
@@ -206,15 +261,15 @@ void MainWindow::source_document_requested(const QString& document_id) {
 
 void MainWindow::term_inspection_requested(const QString& term,
                                            const QString& chunk_id) {
-    if (!corpus_current_) return;
+    if (corpus_state_ != CorpusState::Current) return;
 
     const std::string term_text = term.toStdString();
     try {
-        const std::size_t document_frequency = processing_core_.document_frequency(term_text);
+        const std::size_t document_frequency = corpus_->document_frequency(term_text);
         if (chunk_id.isEmpty()) {
             term_inspector_widget_->set_statistics(document_frequency, false, 0);
         } else {
-            const std::size_t chunk_frequency = processing_core_.term_frequency(term_text, chunk_id.toStdString());
+            const std::size_t chunk_frequency = corpus_->term_frequency(term_text, chunk_id.toStdString());
             term_inspector_widget_->set_statistics(document_frequency, true, chunk_frequency);
         }
     } catch (const std::invalid_argument&) {
@@ -226,8 +281,12 @@ void MainWindow::term_inspection_requested(const QString& term,
 }
 
 void MainWindow::reset_application() {
+    if (builder_.running()) {
+        ++build_id_;
+        builder_.cancel();
+    }
     workspace_.clear();
-    corpus_current_ = false;
+    set_corpus_state(CorpusState::NotCurrent);
 
     const std::array<Resettable*, 4> components{workspace_widget_, search_widget_,
                                                 term_inspector_widget_, context_widget_};
@@ -244,16 +303,21 @@ void MainWindow::exit_application() {
 }
 
 void MainWindow::update_action_states() {
-    const bool can_query = corpus_current_ && search_widget_->has_query();
-    workspace_widget_->set_build_corpus_enabled(!workspace_.documents().empty());
+    const bool current = corpus_state_ == CorpusState::Current;
+    const bool can_query = current && search_widget_->has_query();
+    workspace_widget_->set_build_corpus_enabled(!workspace_.documents().empty() && !builder_.running());
     search_widget_->set_search_enabled(can_query);
-    term_inspector_widget_->set_inspection_enabled(corpus_current_);
+    term_inspector_widget_->set_inspection_enabled(current);
     context_widget_->set_build_context_enabled(can_query);
 }
 
 void MainWindow::invalidate_corpus() {
-    if (corpus_current_) workspace_widget_->set_corpus_status("Out of date");
-    corpus_current_ = false;
+    if (builder_.running()) {
+        ++build_id_;
+        builder_.cancel();
+    }
+    if (corpus_state_ != CorpusState::NotCurrent) workspace_widget_->set_corpus_status("Out of date");
+    set_corpus_state(CorpusState::NotCurrent);
     clear_processing_outputs();
     update_action_states();
 }
@@ -262,6 +326,24 @@ void MainWindow::clear_processing_outputs() {
     search_widget_->clear_results();
     term_inspector_widget_->clear_statistics();
     context_widget_->clear_context();
+}
+
+void MainWindow::set_corpus_state(CorpusState state) {
+    if (corpus_state_ == state) return;
+    corpus_state_ = state;
+    emit corpus_state_changed();
+}
+
+bool MainWindow::start_remote_add(const QString& socket_path) {
+    ipc_server_ = std::make_unique<ipc::IpcServer>();
+    // The signal is emitted on the IPC thread; queue it so the slot runs on the GUI thread.
+    connect(ipc_server_.get(), &ipc::IpcServer::document_received,
+            this, &MainWindow::remote_add_requested, Qt::QueuedConnection);
+    return ipc_server_->start(socket_path.toStdString());
+}
+
+void MainWindow::remote_add_requested(const QString& path) {
+    add_document_file(path);
 }
 
 }  // namespace aiws::gui
