@@ -2,7 +2,6 @@
 
 #include <QObject>
 
-#include <atomic>
 #include <string>
 #include <thread>
 
@@ -35,7 +34,7 @@ namespace aiws::ipc
 
         int listen_fd_{-1};
         std::string socket_path_;
-        std::atomic_bool stop_requested_{false};
+        int wake_fds_[2]{-1, -1};
         std::thread server_thread_;
     };
 

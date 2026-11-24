@@ -9,18 +9,22 @@
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
+#include <QLineEdit>
 #include <QListWidget>
 #include <QProcess>
 #include <QPushButton>
 #include <QStringList>
+#include <QTableView>
 #include <QTemporaryDir>
 #include <QTest>
 
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -32,7 +36,7 @@
 
 namespace {
 using aiws::gui::MainWindow;
-using State = MainWindow::CorpusState;
+using State = MainWindow::CorpusStatus;
 
 int failures = 0;
 
@@ -118,6 +122,26 @@ public:
     }
 };
 
+std::atomic<std::thread::id> recorded_thread_id;
+
+class ThreadRecordingChunker final : public aiws::ChunkingStrategy {
+public:
+    std::vector<aiws::Chunk> chunk(const aiws::Document& document, std::size_t order) const override {
+        recorded_thread_id = std::this_thread::get_id();
+        return aiws::Chunker{}.chunk(document, order);
+    }
+};
+
+std::atomic<int> counted_builds{0};
+
+class CountingChunker final : public aiws::ChunkingStrategy {
+public:
+    std::vector<aiws::Chunk> chunk(const aiws::Document& document, std::size_t order) const override {
+        ++counted_builds;
+        return aiws::Chunker{}.chunk(document, order);
+    }
+};
+
 std::unique_ptr<aiws::ProcessingCore> failing_core() {
     return std::make_unique<aiws::ProcessingCore>(std::make_unique<ThrowingChunker>(),
                                                   std::make_unique<aiws::RetrievalEngine>(),
@@ -130,10 +154,31 @@ std::unique_ptr<aiws::ProcessingCore> slow_core() {
                                                   std::make_unique<aiws::ContextBuilder>());
 }
 
+std::unique_ptr<aiws::ProcessingCore> thread_recording_core() {
+    return std::make_unique<aiws::ProcessingCore>(std::make_unique<ThreadRecordingChunker>(),
+                                                  std::make_unique<aiws::RetrievalEngine>(),
+                                                  std::make_unique<aiws::ContextBuilder>());
+}
+
+std::unique_ptr<aiws::ProcessingCore> counting_core() {
+    return std::make_unique<aiws::ProcessingCore>(std::make_unique<CountingChunker>(),
+                                                  std::make_unique<aiws::RetrievalEngine>(),
+                                                  std::make_unique<aiws::ContextBuilder>());
+}
+
 aiws::Workspace one_document() {
     aiws::Workspace workspace;
     workspace.add_document(aiws::Document{"a", "A", "Alpha beta gamma."});
     return workspace;
+}
+
+std::optional<aiws::BuildResult> wait_for_result(aiws::CorpusBuilder& builder) {
+    std::optional<aiws::BuildResult> result;
+    wait_until([&] {
+        if (!result) result = builder.take();
+        return result.has_value();
+    });
+    return result;
 }
 }  // namespace
 
@@ -144,23 +189,65 @@ int main(int argc, char* argv[]) {
     const QString doc_b = write_file(dir, "b.txt", "Delta epsilon zeta.");
 
     {
-        aiws::CorpusBuilder builder;
-        builder.start(std::make_unique<aiws::ProcessingCore>(), one_document(), 0, 7);
-        check(wait_until([&] { return builder.result_ready(); }), "a successful build produces a result");
-        aiws::BuildResult result = builder.take();
-        check(result.build_id == 7, "the result carries the id the build was started with");
-        check(result.core != nullptr && result.core->chunk_count() > 0, "a successful build returns a filled core");
-        check(result.error.empty(), "a successful build reports no error");
-        check(!builder.running(), "taking the result joins the build thread");
+        auto window = std::make_unique<MainWindow>();
+        window->add_document_file(doc_a);
+        find_button(*window, "Build Corpus")->click();
+        wait_until([&] { return window->corpus_state() == State::Current; });
+        QElapsedTimer timer;
+        timer.start();
+        window.reset();
+        check(timer.elapsed() < 1000, "exiting with no build running returns quickly");
     }
 
     {
         aiws::CorpusBuilder builder;
-        builder.start(failing_core(), one_document(), 0, 3);
-        check(wait_until([&] { return builder.result_ready(); }), "a failing build still produces a result");
-        aiws::BuildResult result = builder.take();
-        check(result.core == nullptr, "a failing build returns no core");
-        check(!result.error.empty(), "a failing build returns its error message");
+        builder.request(std::make_unique<aiws::ProcessingCore>(), one_document(), 0);
+        const std::optional<aiws::BuildResult> result = wait_for_result(builder);
+        check(result && result->core != nullptr && result->core->chunk_count() > 0 && result->error.empty(),
+              "a successful build produces a filled core with no error");
+    }
+
+    {
+        aiws::CorpusBuilder builder;
+        builder.request(failing_core(), one_document(), 0);
+        const std::optional<aiws::BuildResult> result = wait_for_result(builder);
+        check(result && result->core == nullptr && !result->error.empty(), "a failing build reports its error message and no core");
+    }
+
+    {
+        aiws::CorpusBuilder builder;
+        std::vector<std::thread::id> build_threads;
+        for (int i = 0; i < 2; i++) {
+            builder.request(thread_recording_core(), one_document(), 0);
+            wait_for_result(builder);
+            build_threads.push_back(recorded_thread_id.load());
+        }
+        check(build_threads.size() == 2 && build_threads[0] == build_threads[1] &&
+                  build_threads[0] != std::this_thread::get_id(),
+              "every build runs on the same worker thread, not the gui thread");
+    }
+
+    {
+        aiws::CorpusBuilder builder;
+        builder.request(counting_core(), one_document(), 3000);
+        builder.cancel();
+        builder.request(std::make_unique<aiws::ProcessingCore>(), one_document(), 0);
+        QElapsedTimer timer;
+        timer.start();
+        const std::optional<aiws::BuildResult> result = wait_for_result(builder);
+        check(result && timer.elapsed() < 1000 && counted_builds == 0,
+              "a cancelled build request is never built and does not delay the next one");
+    }
+
+    {
+        MainWindow window;
+        QPushButton* build = find_button(window, "Build Corpus");
+        const bool disabled_when_empty = !build->isEnabled();
+        window.add_document_file(doc_a);
+        const bool enabled_with_document = build->isEnabled();
+        find_button(window, "Reset")->click();
+        check(disabled_when_empty && enabled_with_document && !build->isEnabled(),
+              "Build Corpus is enabled only once the workspace has a document, and disabled again after Reset");
     }
 
     {
@@ -180,7 +267,8 @@ int main(int argc, char* argv[]) {
         build->click();
         QTest::qWait(100);
         window.add_document_file(doc_b);
-        check(wait_until([&] { return build->isEnabled(); }), "the stale build finishes and Build is enabled again");
+        check(build->isEnabled(), "Build is enabled as soon as a document is added mid-build");
+        QTest::qWait(600);
         check(window.corpus_state() == State::NotCurrent,
               "a build that finishes after a document was added is rejected");
     }
@@ -198,17 +286,67 @@ int main(int argc, char* argv[]) {
 
     {
         MainWindow window;
-        window.set_core_factory(failing_core);
         window.add_document_file(doc_a);
+        find_button(window, "Build Corpus")->click();
+        wait_until([&] { return window.corpus_state() == State::Current; });
+        window.findChild<QLineEdit*>()->setText("alpha");
+        find_button(window, "Search")->click();
+        check(window.findChild<QTableView*>()->model()->rowCount() > 0, "a search on a current corpus shows results");
+
+        window.set_core_factory(failing_core);
         find_button(window, "Build Corpus")->click();
         check(wait_until([&] { return window.corpus_state() != State::Building; }),
               "a failed build leaves the building state");
         check(window.corpus_state() == State::NotCurrent, "a failed build leaves the corpus not current");
+        check(!find_button(window, "Search")->isEnabled() && !find_button(window, "Inspect")->isEnabled() &&
+                  !find_button(window, "Build Context")->isEnabled(),
+              "search, inspect, and context are unavailable after a failed build");
+        check(window.findChild<QTableView*>()->model()->rowCount() == 0,
+              "results from the old corpus are not shown after a failed build");
 
         window.set_core_factory(nullptr);
         find_button(window, "Build Corpus")->click();
         check(wait_until([&] { return window.corpus_state() == State::Current; }),
               "after a failed build the user can build again successfully");
+    }
+
+    {
+        MainWindow window;
+        window.set_build_delay_ms(3000);
+        window.add_document_file(doc_a);
+        find_button(window, "Build Corpus")->click();
+        QTest::qWait(100);
+        find_button(window, "Reset")->click();
+        window.add_document_file(doc_a);
+        window.set_build_delay_ms(0);
+        find_button(window, "Build Corpus")->click();
+        check(wait_until([&] { return window.corpus_state() == State::Current; }, 1000),
+              "a reset during a long build lets the next build finish without waiting");
+    }
+
+    {
+        MainWindow window;
+        window.set_build_delay_ms(3000);
+        window.add_document_file(doc_a);
+        find_button(window, "Build Corpus")->click();
+        QTest::qWait(100);
+        window.add_document_file(doc_b);
+        window.set_build_delay_ms(0);
+        find_button(window, "Build Corpus")->click();
+        check(wait_until([&] { return window.corpus_state() == State::Current; }, 1000),
+              "adding a document during a long build lets the next build finish without waiting");
+    }
+
+    {
+        auto window = std::make_unique<MainWindow>();
+        window->set_core_factory(slow_core);
+        window->add_document_file(doc_a);
+        find_button(*window, "Build Corpus")->click();
+        QTest::qWait(100);
+        QElapsedTimer timer;
+        timer.start();
+        window.reset();
+        check(timer.elapsed() < 1000, "exiting while a build is processing returns quickly");
     }
 
     {

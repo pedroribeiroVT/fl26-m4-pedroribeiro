@@ -8,11 +8,11 @@
 
 #include <cstdint>
 #include <memory>
+#include <string>
 
 class QLabel;
 class QPushButton;
 class QString;
-class QTimer;
 class QWidget;
 
 namespace aiws::ipc {
@@ -22,6 +22,7 @@ class IpcServer;
 namespace aiws::gui {
 
 class ContextWidget;
+class CorpusState;
 class SearchWidget;
 class TermInspectorWidget;
 class WorkspaceWidget;
@@ -55,8 +56,8 @@ public:
      */
     using CoreFactory = std::unique_ptr<ProcessingCore> (*)();
 
-    /** @brief Whether the corpus may be used for the present Workspace. */
-    enum class CorpusState { NotCurrent, Building, Current };
+    /** @brief Read-only report of the current corpus state, for tests; never used to decide a transition. */
+    enum class CorpusStatus { NotCurrent, Building, Current };
 
     /**
      * @brief Constructs the main AI Workspace application window.
@@ -65,7 +66,7 @@ public:
     explicit MainWindow(QWidget* parent = nullptr);
 
     /**
-     * @brief Stops the IPC server (if any), then cancels and joins any running build.
+     * @brief Stops the IPC server (if any), then stops and joins the build worker.
      *
      * Defined out of line because ipc_server_ holds an incomplete type here.
      */
@@ -100,8 +101,8 @@ public:
      */
     void set_core_factory(CoreFactory factory) noexcept;
 
-    /** @brief Current corpus state (for tests and status display). */
-    CorpusState corpus_state() const noexcept;
+    /** @brief What the current state object reports (for tests). */
+    CorpusStatus corpus_state() const noexcept;
 
     // ---- CR-1 additions ---------------------------------------------------
 
@@ -123,7 +124,7 @@ signals:
      */
     void build_finished(bool success);
 
-    /** @brief Emitted on the GUI thread whenever corpus_state() changes. */
+    /** @brief Emitted on the GUI thread whenever the current state object is replaced. */
     void corpus_state_changed();
 
     // Everything below this line is the M3 design. In M4 it is yours to
@@ -184,11 +185,8 @@ private slots:
      */
     void exit_application();
 
-    /**
-     * @brief Timer slot: collects a finished build and accepts it only if it is
-     * still current for the present Workspace; otherwise discards it.
-     */
-    void poll_build();
+    /** @brief Takes the worker's finished build; a stale one was already discarded by take(). */
+    void finish_build();
 
     /**
      * @brief GUI-thread handler for a path received by the IPC server (CR-1).
@@ -206,31 +204,31 @@ private:
     void update_action_states();
 
     /**
-     * @brief Marks the processing corpus as no longer current for the workspace.
-     *
-     * Processing output that depends on the previous corpus is no longer made
-     * available after invalidation.
-     */
-    void invalidate_corpus();
-
-    /**
      * @brief Clears displayed search and context output that depends on processing state.
      */
     void clear_processing_outputs();
 
-    /** @brief Stores the new corpus state and emits corpus_state_changed() if it differs. */
-    void set_corpus_state(CorpusState state);
+    /** @brief Replaces the current state with next, unless next is null (stay). */
+    void change_state(std::unique_ptr<CorpusState> next);
+
+    friend class EmptyState;
+    friend class OutOfDateState;
+    friend class BuildingState;
+    friend class CurrentState;
+    void start_build();
+    void cancel_build();
+    void show_out_of_date();
+    void accept_corpus(std::unique_ptr<ProcessingCore> corpus);
+    void report_build_failure(const std::string& error);
 
     Workspace workspace_;
     std::unique_ptr<ProcessingCore> corpus_;     // null until a build is accepted
-    CorpusState corpus_state_{CorpusState::NotCurrent};
+    std::unique_ptr<CorpusState> state_;
     ExitCallback exit_callback_{nullptr};
 
-    std::uint64_t build_id_{0};                  // id of the only build whose result may be accepted
     int build_delay_ms_{0};
     CoreFactory core_factory_{nullptr};
-    QTimer* poll_timer_{nullptr};                // Qt-parented to this window
-    CorpusBuilder builder_;                      // its destructor cancels and joins the build thread
+    CorpusBuilder builder_;                      // its destructor stops and joins the build thread
 
     WorkspaceWidget* workspace_widget_{nullptr};
     SearchWidget* search_widget_{nullptr};

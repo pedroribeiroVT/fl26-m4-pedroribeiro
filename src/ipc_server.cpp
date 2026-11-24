@@ -18,30 +18,29 @@ namespace aiws::ipc
     namespace
     {
 
-        bool receive_bytes(int fd,
-                           void *data,
-                           std::size_t size,
-                           const std::atomic_bool &stop_requested)
+        bool wait_readable(int fd, int wake_fd)
+        {
+            pollfd descriptors[2]{{fd, POLLIN, 0}, {wake_fd, POLLIN, 0}};
+            while (poll(descriptors, 2, -1) < 0)
+            {
+                if (errno != EINTR)
+                {
+                    return false;
+                }
+            }
+            return descriptors[1].revents == 0;
+        }
+
+        bool receive_bytes(int fd, void *data, std::size_t size, int wake_fd)
         {
             auto *bytes = static_cast<char *>(data);
             std::size_t received = 0;
 
             while (received < size)
             {
-                if (stop_requested.load())
+                if (!wait_readable(fd, wake_fd))
                 {
                     return false;
-                }
-
-                pollfd descriptor{fd, POLLIN, 0};
-                const int ready = poll(&descriptor, 1, 100);
-                if (ready < 0)
-                {
-                    return false;
-                }
-                if (ready == 0)
-                {
-                    continue;
                 }
 
                 const ssize_t count = recv(fd, bytes + received, size - received, 0);
@@ -93,7 +92,8 @@ namespace aiws::ipc
 
         ::unlink(socket_path.c_str());
         if (::bind(fd, reinterpret_cast<const sockaddr *>(&address), sizeof(address)) < 0 ||
-            ::listen(fd, 8) < 0)
+            ::listen(fd, 8) < 0 ||
+            ::pipe(wake_fds_) < 0)
         {
             ::close(fd);
             ::unlink(socket_path.c_str());
@@ -102,40 +102,34 @@ namespace aiws::ipc
 
         listen_fd_ = fd;
         socket_path_ = socket_path;
-        stop_requested_.store(false);
         server_thread_ = std::thread(&IpcServer::run, this);
         return true;
     }
 
     void IpcServer::stop()
     {
-        stop_requested_.store(true);
-
-        if (server_thread_.joinable())
+        if (!server_thread_.joinable())
         {
-            server_thread_.join();
+            return;
         }
+
+        // The byte is never read, so every later poll() in the IPC thread wakes too.
+        [[maybe_unused]] const ssize_t written = ::write(wake_fds_[1], "x", 1);
+        server_thread_.join();
+
+        ::close(wake_fds_[0]);
+        ::close(wake_fds_[1]);
+        wake_fds_[0] = -1;
+        wake_fds_[1] = -1;
+        ::close(listen_fd_);
+        listen_fd_ = -1;
+        ::unlink(socket_path_.c_str());
     }
 
     void IpcServer::run()
     {
-        while (!stop_requested_.load())
+        while (wait_readable(listen_fd_, wake_fds_[0]))
         {
-            pollfd descriptor{listen_fd_, POLLIN, 0};
-            const int ready = poll(&descriptor, 1, 100);
-            if (ready < 0)
-            {
-                if (errno == EINTR)
-                {
-                    continue;
-                }
-                break;
-            }
-            if (ready == 0)
-            {
-                continue;
-            }
-
             const int client_fd = accept(listen_fd_, nullptr, nullptr);
             if (client_fd < 0)
             {
@@ -147,7 +141,7 @@ namespace aiws::ipc
             }
 
             char header[headerSize];
-            bool valid = receive_bytes(client_fd, header, sizeof(header), stop_requested_);
+            bool valid = receive_bytes(client_fd, header, sizeof(header), wake_fds_[0]);
             std::string path;
 
             if (valid && std::memcmp(header, magic, magicSize) == 0)
@@ -160,7 +154,7 @@ namespace aiws::ipc
                 else
                 {
                     path.resize(path_size);
-                    valid = receive_bytes(client_fd, path.data(), path.size(), stop_requested_);
+                    valid = receive_bytes(client_fd, path.data(), path.size(), wake_fds_[0]);
                 }
             }
             else
@@ -188,17 +182,6 @@ namespace aiws::ipc
             }
 
             close(client_fd);
-        }
-
-        if (listen_fd_ >= 0)
-        {
-            close(listen_fd_);
-            listen_fd_ = -1;
-        }
-
-        if (!socket_path_.empty())
-        {
-            unlink(socket_path_.c_str());
         }
     }
 

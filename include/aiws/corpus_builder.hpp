@@ -3,44 +3,60 @@
 #include "aiws/processing_core.hpp"
 #include "aiws/workspace.hpp"
 
-#include <atomic>
+#include <QObject>
+
+#include <condition_variable>
 #include <cstdint>
-#include <future>
 #include <memory>
+#include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 
 namespace aiws {
 
 struct BuildResult {
-    std::uint64_t build_id{0};
+    std::uint64_t generation{0};
     std::unique_ptr<ProcessingCore> core;
     std::string error;
 };
 
-class CorpusBuilder {
+class CorpusBuilder final : public QObject {
+    Q_OBJECT
+
 public:
-    CorpusBuilder() = default;
-    ~CorpusBuilder();
+    explicit CorpusBuilder(QObject* parent = nullptr);
+    ~CorpusBuilder() override;
 
     CorpusBuilder(const CorpusBuilder&) = delete;
     CorpusBuilder& operator=(const CorpusBuilder&) = delete;
     CorpusBuilder(CorpusBuilder&&) = delete;
     CorpusBuilder& operator=(CorpusBuilder&&) = delete;
 
-    void start(std::unique_ptr<ProcessingCore> core,
-               Workspace workspace,
-               int delay_ms_per_document,
-               std::uint64_t build_id);
-    bool running() const noexcept;
-    bool result_ready() const;
-    BuildResult take();
-    void cancel() noexcept;
+    void request(std::unique_ptr<ProcessingCore> core, Workspace workspace, int delay_ms_per_document);
+    void cancel();
+    std::optional<BuildResult> take();
+
+signals:
+    void build_done();
 
 private:
+    struct Request {
+        std::unique_ptr<ProcessingCore> core;
+        Workspace workspace;
+        int delay_ms_per_document{0};
+        std::uint64_t generation{0};
+    };
+
+    void run();
+
+    std::mutex mutex_;
+    std::condition_variable cv_;
+    std::optional<Request> pending_;
+    std::optional<BuildResult> finished_;
+    std::uint64_t generation_{0};
+    bool stop_{false};
     std::thread thread_;
-    std::future<BuildResult> result_;
-    std::atomic<bool> cancel_{false};
 };
 
 }  // namespace aiws
