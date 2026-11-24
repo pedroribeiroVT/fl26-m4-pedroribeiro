@@ -1,3 +1,32 @@
+commit 8f456ddf56938cc0a487294757c5bc6a82121cc7
+Author: Pedro Ribeiro <pedroribeiro@vt.edu>
+Date:   2026-11-23 23:37:32 -0500
+
+    done
+
+ CMakeLists.txt                    |  15 ++--
+ DESIGN.md                         |  70 +++++++---------
+ include/aiws/corpus_builder.hpp   |  48 +++++++----
+ include/aiws/gui/corpus_state.hpp |  56 +++++++++++++
+ include/aiws/gui/main_window.hpp  |  50 ++++++------
+ include/aiws/ipc_server.hpp       |   3 +-
+ src/corpus_builder.cpp            | 157 +++++++++++++++--------------------
+ src/corpus_state.cpp              |  62 ++++++++++++++
+ src/ipc_server.cpp                |  85 ++++++++-----------
+ src/main_window.cpp               | 131 +++++++++++++----------------
+ tests/student_tests.cpp           | 168 ++++++++++++++++++++++++++++++++++----
+ 11 files changed, 520 insertions(+), 325 deletions(-)
+
+commit 89dd3266a57d6412128da809ee3fef13f7d2c841
+Author: Pedro Ribeiro <pedroribeiro@vt.edu>
+Date:   2026-11-08 23:51:13 -0500
+
+    added tools and HISTORY
+
+ HISTORY.txt         |  74 +++++++++++++++++++++++++++++++
+ tools/aiws_send.cpp | 125 ++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 199 insertions(+)
+
 commit 676ef7503d903c1109753cd1f6a5cbfb116bd965
 Author: Pedro Ribeiro <pedroribeiro@vt.edu>
 Date:   2026-11-08 23:48:18 -0500
